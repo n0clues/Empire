@@ -1,5 +1,10 @@
 #!/bin/bash
 
+if [[ $EUID -ne 0 ]]; then
+   echo " [!]This script must be run as root" 1>&2
+   exit 1
+fi
+
 IFS='/' read -a array <<< pwd
 
 if [[ "$(pwd)" != *setup ]]
@@ -10,50 +15,71 @@ fi
 version=$( lsb_release -r | grep -oP "[0-9]+" | head -1 )
 if lsb_release -d | grep -q "Fedora"; then
 	Release=Fedora
-	dnf install -y python-devel m2crypto python-m2ext swig python-iptools python3-iptools libssl-dev
+	dnf install -y make g++ python-devel m2crypto python-m2ext swig python-iptools python3-iptools libxml2-devel default-jdk openssl-devel libssl-dev
+	pip install setuptools
 	pip install pycrypto
 	pip install iptools
 	pip install pydispatcher
 	pip install flask
+	pip install macholib
+	pip install dropbox
 	pip install pyOpenSSL
+	pip install pyinstaller
+	pip install zlib_wrapper
+	pip install netifaces
 elif lsb_release -d | grep -q "Kali"; then
 	Release=Kali
-	apt-get install -y python-dev python-m2crypto swig python-pip libssl-dev
+	apt-get install -y make g++ python-dev python-m2crypto swig python-pip libxml2-dev default-jdk libssl-dev
+	pip install setuptools
 	pip install pycrypto
 	pip install iptools
 	pip install pydispatcher
 	pip install flask
+	pip install macholib
+	pip install dropbox
 	pip install pyOpenSSL
-elif lsb_release -d | grep -q "Arch"; then
-	Release=Arch
-	pacman -S --noconfirm --needed base-devel python2 python2-m2crypto swig python2-pip openssl python2-flask python2-pyopenssl python2-crypto
-	pip2 install iptools
-	pip2 install pydispatcher
+	pip install pyinstaller
+	pip install zlib_wrapper
+	pip install netifaces
 elif lsb_release -d | grep -q "Ubuntu"; then
 	Release=Ubuntu
-	apt-get install -y python-dev python-m2crypto swig python-pip libssl-dev
+	apt-get install -y make g++ python-dev python-m2crypto swig python-pip libxml2-dev default-jdk libssl-dev
+	pip install setuptools
 	pip install pycrypto
 	pip install iptools
 	pip install pydispatcher
 	pip install flask
 	pip install pyOpenSSL
-elif [ -f /usr/bin/apt-get ]; then
-	echo "Looks like a Debian/Ubuntu variant. Trying apt-get..."
- 	wget https://bootstrap.pypa.io/get-pip.py
- 	python ./get-pip.py
- 	apt-get install -y python-m2crypto swig python-pip libssl-dev build-essential libffi-dev python-dev
- 	pip install cryptography
- 	pip install pyopenssl
- 	pip install pycrypto
- 	pip install iptools
- 	pip install pydispatcher
- 	pip install flask
- 	pip install pyOpenSSL
+	pip install macholib
+	pip install dropbox
+	pip install pyopenssl
+	pip install pyinstaller
+	pip install zlib_wrapper
+	pip install netifaces
 else
-	echo "Unknown distro - install cannot proceed..."
-	exit 1;
+	echo "Unknown distro - Debian/Ubuntu Fallback"
+	 apt-get install -y make g++ python-dev python-m2crypto swig python-pip libxml2-dev default-jdk libffi-dev libssl-dev
+	 pip install setuptools
+	 pip install pycrypto
+	 pip install iptools
+	 pip install pydispatcher
+	 pip install flask
+	 pip install macholib
+	 pip install dropbox
+	 pip install cryptography
+	 pip install pyOpenSSL
+	 pip install pyinstaller
+	 pip install zlib_wrapper
+	 pip install netifaces
 fi
-
+tar -xvf ../data/misc/xar-1.5.2.tar.gz
+(cd xar-1.5.2 && ./configure)
+(cd xar-1.5.2 && make)
+(cd xar-1.5.2 && make install)
+git clone https://github.com/hogliux/bomutils.git
+(cd bomutils && make)
+(cd bomutils && make install)
+chmod 755 bomutils/build/bin/mkbom && cp bomutils/build/bin/mkbom /usr/local/bin/mkbom
 # set up the database schema
 if $Release == "Arch"; then
 	python2 ./setup_database.py
